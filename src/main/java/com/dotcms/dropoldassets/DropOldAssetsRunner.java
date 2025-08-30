@@ -44,7 +44,8 @@ public class DropOldAssetsRunner implements Runnable {
 
   final String EARLIEST_CONTENTLET_DATE = "SELECT min(mod_date) as start_date from contentlet where identifier <> 'SYSTEM_HOST' or identifier is null";
 
-
+  final boolean CLEAN_DEAD_INODE_FROM_FS = Try.of(
+      () -> Boolean.parseBoolean(OSGiPluginProperties.getProperty("CLEAN_DEAD_INODE_FROM_FS", "true"))).getOrElse(true);
 
   final boolean DROP_OLD_ASSET_DRY_RUN = Try.of(
       () -> Boolean.parseBoolean(OSGiPluginProperties.getProperty("DROP_OLD_ASSET_DRY_RUN", "true"))).getOrElse(true);
@@ -186,6 +187,7 @@ public class DropOldAssetsRunner implements Runnable {
           if(isInterrupted()){
             return;
           }
+          Thread.sleep(100);
           inodeList.addAll(loadInodes(startDate, endDate, batchSize, conn));
 
         }
@@ -208,7 +210,9 @@ public class DropOldAssetsRunner implements Runnable {
   }
 
   boolean deleteFromAssetsDir(List<String> inodes) {
-
+    if(!CLEAN_DEAD_INODE_FROM_FS){
+      return true;
+    }
     for(String inode : inodes){
       String path = APILocator.getFileAssetAPI().getRealAssetPath(inode).replace(FileAssetAPI.BINARY_FIELD +  File.separator,"");
 
