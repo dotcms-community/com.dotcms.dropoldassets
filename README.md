@@ -21,6 +21,9 @@ DROP_OLD_ASSET_DRY_RUN=false
 
 ## rm -rf the old asset inode directory
 CLEAN_DEAD_INODE_FROM_FS=true
+
+## should this plugin run on startup?
+RUN_ON_STARTUP=true
 ```
 
 
@@ -37,4 +40,3 @@ To build the JAR, run the following Maven command:
 mvn clean install
 ```
 The plugin jar will be under the `./target/` directory
-

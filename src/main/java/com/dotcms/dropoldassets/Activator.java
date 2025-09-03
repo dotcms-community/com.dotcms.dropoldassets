@@ -13,20 +13,10 @@ import java.util.concurrent.TimeUnit;
 import org.apache.logging.log4j.core.util.CronExpression;
 import org.osgi.framework.BundleContext;
 
-/**
- * This OSGi Plugin will automatically unlock content that has been locked for X amount of time. You can specify the
- * duration to wait before unlocking by modifying the {@code UNLOCK_AFTER_SECONDS} property in the
- * {@code plugin.properties} file found under the {@code src/main/resources/} directory. You can also modify the
- * {@code CRON_EXPRESSION} expression of the cron job for the job itself.
- *
- * @author dotCMS
- * @since Aug 10, 2021
- */
+
 public class Activator extends GenericBundleActivator {
 
-  public final static String JOB_NAME = "Unlocks locked content based on a timer";
-  public final static String JOB_GROUP = "OSGi Jobs";
-  public final static String JOB_CLASS = "com.dotcms.job.UnlockContentTimer";
+
 
 
   private final Runnable runner = new DropOldAssetsRunner();
@@ -34,18 +24,14 @@ public class Activator extends GenericBundleActivator {
   private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
 
 
-  /**
-   * This is the staring point for all OSGi plugins in dotCMS. This is where all the setup and basic configuration
-   * routines must be called.
-   *
-   * @param context The OSGi {@link BundleContext} object.
-   * @throws Exception An error occurred during the plugin's initialization.
-   */
+
   @Override
   public void start(final BundleContext context) throws Exception {
+    boolean runNow = OSGiPluginProperties.getProperty("RUN_ON_STARTUP", "true").equalsIgnoreCase("true");
 
-    // run now
-    scheduler.schedule(runner, 10, TimeUnit.SECONDS);
+    if( runNow) {
+      scheduler.schedule(runner, 10, TimeUnit.SECONDS);
+    }
 
     String jobCron = OSGiPluginProperties.getProperty("CRON_EXPRESSION", "");
 
