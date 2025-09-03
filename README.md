@@ -4,10 +4,10 @@ This plugin Force Runs DropOldAssets.  It can be configured to run on a schedule
 
 These are the configurable values
 ```
-## When to run the plugin
+## When to run the plugin - every day at 10:15am
 CRON_EXPRESSION=0 15 10 * * ?
 
-## Query every 2 days - the smaller the window the more queries, but they are lighter
+## Query span 2 days - the smaller the window the more queries, but they are lighter
 DROP_OLD_ASSET_ITERATE_BY_DAYS=2
 
 ## Only drop versions older than this
@@ -21,7 +21,6 @@ DROP_OLD_ASSET_DRY_RUN=false
 
 ## rm -rf the old asset inode directory
 CLEAN_DEAD_INODE_FROM_FS=true
-
 
 ## should this plugin run on startup?
 RUN_ON_STARTUP=true
