@@ -26,7 +26,7 @@ public class DropOldAssetsRunner implements Runnable {
 
     final String SELECT_OLD_CONTENT_INODES = "SELECT c.inode FROM contentlet c"
             + " WHERE "
-            + " (c.identifier <> 'SYSTEM_HOST' or c.identifier is null) "
+            + " (c.identifier <> 'SYSTEM_HOST' AND c.identifier IS NOT NULL) "
             + " AND c.mod_date >= ? "
             + " AND c.mod_date <= ? "
             + " AND NOT EXISTS "
@@ -36,6 +36,7 @@ public class DropOldAssetsRunner implements Runnable {
             + "    vi.working_inode = c.inode "
             + "    OR vi.live_inode = c.inode"
             + " )"
+            + " ORDER BY c.mod_date ASC"
             + " LIMIT ?";
 
     final String DELETE_CONTENT_DATA = "DELETE FROM contentlet WHERE inode IN (%s)";
@@ -43,10 +44,10 @@ public class DropOldAssetsRunner implements Runnable {
     final String DELETE_TAG_INODES = "DELETE FROM tag_inode where inode IN (%s)";
     final String CREATE_INDEX_CONTENTLET_MOD_DATE = "CREATE INDEX if not exists idx_contentlet_mod_date on contentlet(mod_date)";
 
-    final String EARLIEST_CONTENTLET_DATE = "SELECT min(mod_date) as start_date from contentlet where identifier <> 'SYSTEM_HOST' or identifier is null";
+    final String EARLIEST_CONTENTLET_DATE = "SELECT min(mod_date) as start_date from contentlet where identifier <> 'SYSTEM_HOST' and identifier is not null";
 
     final boolean CLEAN_DEAD_INODE_FROM_FS = Props.getBool("CLEAN_DEAD_INODE_FROM_FS", true);
-    final boolean DROP_OLD_ASSET_DRY_RUN = Props.getBool("DROP_OLD_ASSET_DRY_RUN", true);
+    final boolean DROP_OLD_ASSET_DRY_RUN = Props.getBool("DROP_OLD_ASSET_DRY_RUN", false);
     final long SLEEP_BETWEEN_RUNS_MS = Props.getLong("SLEEP_BETWEEN_RUNS_MS", 100);
     final int OLDER_THAN_DAYS = Props.getInt("DROP_OLD_ASSET_OLDER_THAN_DAYS", 60);
     final int DROP_OLD_ASSET_BATCH_SIZE = Props.getInt("DROP_OLD_ASSET_BATCH_SIZE", 100);
