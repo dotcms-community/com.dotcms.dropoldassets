@@ -21,254 +21,236 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 
-
 public class DropOldAssetsRunner implements Runnable {
 
 
-  final String SELECT_OLD_CONTENT_INODES = "SELECT c.inode FROM contentlet c"
-      + " WHERE "
-      + " (c.identifier <> 'SYSTEM_HOST' or c.identifier is null) "
-      + " AND c.mod_date >= ? "
-      + " AND c.mod_date <= ? "
-      + " AND NOT EXISTS "
-      + " ("
-      + "    SELECT 1 FROM contentlet_version_info vi"
-      + "    WHERE "
-      + "    vi.working_inode = c.inode "
-      + "    OR vi.live_inode = c.inode"
-      + " )"
-      + " LIMIT ?";
+    final String SELECT_OLD_CONTENT_INODES = "SELECT c.inode FROM contentlet c"
+            + " WHERE "
+            + " (c.identifier <> 'SYSTEM_HOST' or c.identifier is null) "
+            + " AND c.mod_date >= ? "
+            + " AND c.mod_date <= ? "
+            + " AND NOT EXISTS "
+            + " ("
+            + "    SELECT 1 FROM contentlet_version_info vi"
+            + "    WHERE "
+            + "    vi.working_inode = c.inode "
+            + "    OR vi.live_inode = c.inode"
+            + " )"
+            + " LIMIT ?";
 
-  final String DELETE_CONTENT_DATA = "DELETE FROM contentlet WHERE inode IN (%s)";
-  final String DELETE_CONTENT_INODE = "DELETE FROM  inode where inode IN (%s)";
-  final String DELETE_TAG_INODES = "DELETE FROM tag_inode where inode IN (%s)";
-  final String CREATE_INDEX_CONTENTLET_MOD_DATE = "CREATE INDEX if not exists idx_contentlet_mod_date on contentlet(mod_date)";
+    final String DELETE_CONTENT_DATA = "DELETE FROM contentlet WHERE inode IN (%s)";
+    final String DELETE_CONTENT_INODE = "DELETE FROM  inode where inode IN (%s)";
+    final String DELETE_TAG_INODES = "DELETE FROM tag_inode where inode IN (%s)";
+    final String CREATE_INDEX_CONTENTLET_MOD_DATE = "CREATE INDEX if not exists idx_contentlet_mod_date on contentlet(mod_date)";
 
-  final String EARLIEST_CONTENTLET_DATE = "SELECT min(mod_date) as start_date from contentlet where identifier <> 'SYSTEM_HOST' or identifier is null";
+    final String EARLIEST_CONTENTLET_DATE = "SELECT min(mod_date) as start_date from contentlet where identifier <> 'SYSTEM_HOST' or identifier is null";
 
-  final boolean CLEAN_DEAD_INODE_FROM_FS = Boolean.parseBoolean(OSGiPluginProperties.getProperty("CLEAN_DEAD_INODE_FROM_FS", "true"));
+    final boolean CLEAN_DEAD_INODE_FROM_FS = Props.getBool("CLEAN_DEAD_INODE_FROM_FS", true);
+    final boolean DROP_OLD_ASSET_DRY_RUN = Props.getBool("DROP_OLD_ASSET_DRY_RUN", true);
+    final long SLEEP_BETWEEN_RUNS_MS = Props.getLong("SLEEP_BETWEEN_RUNS_MS", 100);
+    final int OLDER_THAN_DAYS = Props.getInt("DROP_OLD_ASSET_OLDER_THAN_DAYS", 60);
+    final int DROP_OLD_ASSET_BATCH_SIZE = Props.getInt("DROP_OLD_ASSET_BATCH_SIZE", 100);
+    final int DAYS_TO_ITERATE = Props.getInt("DROP_OLD_ASSET_ITERATE_BY_DAYS", 7);
+    final Date FINAL_END_DATE = Date.from(Instant.now().minus(OLDER_THAN_DAYS, ChronoUnit.DAYS));
+    final int MAX_RUNTIME_SECONDS = Props.getInt("MAX_RUNTIME_SECONDS", 0);
 
-  final boolean DROP_OLD_ASSET_DRY_RUN = Boolean.parseBoolean(OSGiPluginProperties.getProperty("DROP_OLD_ASSET_DRY_RUN", "true"));
+    final Date STOP_RUNNING_AT =
+            MAX_RUNTIME_SECONDS > 0 ? Date.from(Instant.now().plus(MAX_RUNTIME_SECONDS, ChronoUnit.SECONDS))
+                    : Date.from(Instant.MAX);
+    ClusterLockManager<String> locker = DotConcurrentFactory.getInstance()
+            .getClusterLockManager(DropOldAssetsRunner.class.getName());
 
-  final long SLEEP_BETWEEN_RUNS_MS = Long.parseLong(OSGiPluginProperties.getProperty("SLEEP_BETWEEN_RUNS_MS", "100"));
-  final int OLDER_THAN_DAYS = Integer.parseInt(
-      OSGiPluginProperties.getProperty("DROP_OLD_ASSET_OLDER_THAN_DAYS", "60"));
-  final int DROP_OLD_ASSET_BATCH_SIZE = Integer.parseInt(
-      OSGiPluginProperties.getProperty("DROP_OLD_ASSET_BATCH_SIZE", "100"));
-  final int DAYS_TO_ITERATE = Integer.parseInt(
-      OSGiPluginProperties.getProperty("DROP_OLD_ASSET_ITERATE_BY_DAYS", "7"));
-  final Date FINAL_END_DATE = Date.from(Instant.now().minus(OLDER_THAN_DAYS, ChronoUnit.DAYS));
+    Date earliestContentlet() {
+        try (Connection conn = DbConnectionFactory.getConnection()) {
 
-  final int MAX_RUNTIME_SECONDS = Integer.parseInt(
-      OSGiPluginProperties.getProperty("MAX_RUNTIME_SECONDS", "0"));
-
-  ClusterLockManager<String> locker = DotConcurrentFactory.getInstance()
-      .getClusterLockManager(DropOldAssetsRunner.class.getName());
-
-  final Date STOP_RUNNING_AT = MAX_RUNTIME_SECONDS > 0 ?  Date.from(Instant.now().plus(MAX_RUNTIME_SECONDS, ChronoUnit.SECONDS)) : Date.from(Instant.MAX);
-
-
-
-
-
-
-  Date earliestContentlet() {
-    try (Connection conn = DbConnectionFactory.getConnection()) {
-
-      return Try.of(() -> {
-            return (Date) new DotConnect()
-                .setSQL(EARLIEST_CONTENTLET_DATE)
-                .loadObjectResults(conn)
-                .get(0)
-                .get("start_date");
-          }
-      ).getOrElse(Date.from(Instant.parse("2010-01-01T00:00:00Z")));
-    } catch (Exception e) {
-      throw new DotRuntimeException(e.getMessage(), e);
-    }
-  }
-
-  List<String> loadInodes(Date startDate, Date endDate, Connection conn) {
-    try {
-      return new DotConnect()
-          .setSQL(SELECT_OLD_CONTENT_INODES)
-          .addParam(startDate)
-          .addParam(endDate)
-          .addParam(DROP_OLD_ASSET_BATCH_SIZE)
-          .loadObjectResults(conn)
-          .stream()
-          .map(row -> (String) row.get("inode"))
-          .collect(Collectors.toList());
-    } catch (Exception e) {
-      throw new DotRuntimeException(e);
-    }
-  }
-
-  void createIndexIfNeeded(){
-    try (Connection conn = DbConnectionFactory.getConnection()) {
-      DotConnect dc = new DotConnect();
-      Logger.info(this, "Creating index on contentlet.mod_date");
-      dc.setSQL(CREATE_INDEX_CONTENTLET_MOD_DATE);
-      dc.loadResult(conn);
-    } catch (Exception e) {
-      Logger.error(this, "Error creating index on contentlet.mod_date", e);
-      throw new DotRuntimeException(e);
+            return Try.of(() -> {
+                        return (Date) new DotConnect()
+                                .setSQL(EARLIEST_CONTENTLET_DATE)
+                                .loadObjectResults(conn)
+                                .get(0)
+                                .get("start_date");
+                    }
+            ).getOrElse(Date.from(Instant.parse("2010-01-01T00:00:00Z")));
+        } catch (Exception e) {
+            throw new DotRuntimeException(e.getMessage(), e);
+        }
     }
 
-  }
-
-
-
-  void deleteOldContent() {
-
-    Logger.info(this, "------- Delete Drop Old Assets Job Started ------- ");
-    Logger.info(this, "Configuration:");
-    Logger.info(this, "  DROP_OLD_ASSET_OLDER_THAN_DAYS: " + OLDER_THAN_DAYS);
-    Logger.info(this, "  DROP_OLD_ASSET_DRY_RUN: " + DROP_OLD_ASSET_DRY_RUN);
-    Logger.info(this, "  DROP_OLD_ASSET_BATCH_SIZE: " + DROP_OLD_ASSET_BATCH_SIZE);
-    Logger.info(this, "  DAYS_TO_ITERATE: " + DAYS_TO_ITERATE);
-    Logger.info(this, "  FINAL_END_DATE: " + FINAL_END_DATE);
-    Logger.info(this, "  CLEAN_DEAD_INODE_FROM_FS: " + CLEAN_DEAD_INODE_FROM_FS);
-    Logger.info(this, "  SLEEP_BETWEEN_RUNS_MS: " + SLEEP_BETWEEN_RUNS_MS);
-    Logger.info(this, "  MAX_RUNTIME_SECONDS: " + MAX_RUNTIME_SECONDS);
-    Logger.info(this, "----------------------------------------------------");
-
-    createIndexIfNeeded();
-
-
-
-
-    if (isInterrupted()) {
-      return;
+    List<String> loadInodes(Date startDate, Date endDate, Connection conn) {
+        try {
+            return new DotConnect()
+                    .setSQL(SELECT_OLD_CONTENT_INODES)
+                    .addParam(startDate)
+                    .addParam(endDate)
+                    .addParam(DROP_OLD_ASSET_BATCH_SIZE)
+                    .loadObjectResults(conn)
+                    .stream()
+                    .map(row -> (String) row.get("inode"))
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            throw new DotRuntimeException(e);
+        }
     }
-    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
-    Date startDate = earliestContentlet();
-    Date endDate = Date.from(startDate.toInstant().plus(DAYS_TO_ITERATE, ChronoUnit.DAYS));
-    Logger.info(this, "START: Deleting contentlet older than " + sdf.format(FINAL_END_DATE));
-    Logger.info(this, "     : earliest contentlet " + sdf.format(startDate));
-    int deleted = 0;
-    int i = 0;
-    final List<String> inodeList = new ArrayList<>();
-    while (endDate.getTime() < FINAL_END_DATE.getTime()) {
-      if (isInterrupted()) {
-        return;
-      }
-      Logger.info(this, "Looking for old contentlet from " + sdf.format(startDate) + " to " + sdf.format(endDate));
+    void createIndexIfNeeded() {
+        try (Connection conn = DbConnectionFactory.getConnection()) {
+            DotConnect dc = new DotConnect();
+            Logger.info(this, "Creating index on contentlet.mod_date");
+            dc.setSQL(CREATE_INDEX_CONTENTLET_MOD_DATE);
+            dc.loadResult(conn);
+        } catch (Exception e) {
+            Logger.error(this, "Error creating index on contentlet.mod_date", e);
+            throw new DotRuntimeException(e);
+        }
 
-      try (Connection conn = DbConnectionFactory.getConnection()) {
-        inodeList.addAll(loadInodes(startDate, endDate, conn));
-        while (!inodeList.isEmpty()) {
-          if (isInterrupted()) {
+    }
+
+
+    void deleteOldContent() {
+
+        Logger.info(this, "------- Delete Drop Old Assets Job Started ------- ");
+        Logger.info(this, "Configuration:");
+        Logger.info(this, "  DROP_OLD_ASSET_OLDER_THAN_DAYS: " + OLDER_THAN_DAYS);
+        Logger.info(this, "  DROP_OLD_ASSET_DRY_RUN: " + DROP_OLD_ASSET_DRY_RUN);
+        Logger.info(this, "  DROP_OLD_ASSET_BATCH_SIZE: " + DROP_OLD_ASSET_BATCH_SIZE);
+        Logger.info(this, "  DAYS_TO_ITERATE: " + DAYS_TO_ITERATE);
+        Logger.info(this, "  FINAL_END_DATE: " + FINAL_END_DATE);
+        Logger.info(this, "  CLEAN_DEAD_INODE_FROM_FS: " + CLEAN_DEAD_INODE_FROM_FS);
+        Logger.info(this, "  SLEEP_BETWEEN_RUNS_MS: " + SLEEP_BETWEEN_RUNS_MS);
+        Logger.info(this, "  MAX_RUNTIME_SECONDS: " + MAX_RUNTIME_SECONDS);
+        Logger.info(this, "----------------------------------------------------");
+
+        createIndexIfNeeded();
+
+        if (isInterrupted()) {
             return;
-          }
-          if (DROP_OLD_ASSET_DRY_RUN) {
-            Logger.info(this, " --- FOUND  " + inodeList.size() + " old contentlets");
-            deleted += inodeList.size();
-            break;
-          }
-          Logger.info(this, " --- DELETING " + inodeList.size() + " old contentlets");
-          conn.setAutoCommit(false);
-          String inodes = String.join("','", inodeList);
+        }
+        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
 
-          inodes = "'" + inodes + "'";
-          DotConnect dc = new DotConnect();
-          deleted += dc.executeUpdate(conn, String.format(DELETE_CONTENT_DATA, inodes));
+        Date startDate = earliestContentlet();
+        Date endDate = Date.from(startDate.toInstant().plus(DAYS_TO_ITERATE, ChronoUnit.DAYS));
+        Logger.info(this, "START: Deleting contentlet older than " + sdf.format(FINAL_END_DATE));
+        Logger.info(this, "     : earliest contentlet " + sdf.format(startDate));
+        int deleted = 0;
+        int i = 0;
+        final List<String> inodeList = new ArrayList<>();
+        while (endDate.getTime() < FINAL_END_DATE.getTime()) {
+            if (isInterrupted()) {
+                return;
+            }
+            Logger.info(this,
+                    "Looking for old contentlet from " + sdf.format(startDate) + " to " + sdf.format(endDate));
 
-          dc.setSQL(String.format(DELETE_CONTENT_INODE, inodes));
-          dc.loadResult(conn);
+            try (Connection conn = DbConnectionFactory.getConnection()) {
+                inodeList.addAll(loadInodes(startDate, endDate, conn));
+                while (!inodeList.isEmpty()) {
+                    if (isInterrupted()) {
+                        return;
+                    }
+                    if (DROP_OLD_ASSET_DRY_RUN) {
+                        Logger.info(this, " --- FOUND  " + inodeList.size() + " old contentlets");
+                        deleted += inodeList.size();
+                        break;
+                    }
+                    Logger.info(this, " --- DELETING " + inodeList.size() + " old contentlets");
+                    conn.setAutoCommit(false);
+                    String inodes = String.join("','", inodeList);
 
-          dc.setSQL(String.format(DELETE_TAG_INODES, inodes));
-          dc.loadResult(conn);
+                    inodes = "'" + inodes + "'";
+                    DotConnect dc = new DotConnect();
+                    deleted += dc.executeUpdate(conn, String.format(DELETE_CONTENT_DATA, inodes));
 
-          conn.commit();
-          conn.setAutoCommit(true);
+                    dc.setSQL(String.format(DELETE_CONTENT_INODE, inodes));
+                    dc.loadResult(conn);
 
-          deleteFromAssetsDir(inodeList);
+                    dc.setSQL(String.format(DELETE_TAG_INODES, inodes));
+                    dc.loadResult(conn);
 
-          inodeList.clear();
-          if (isInterrupted()) {
+                    conn.commit();
+                    conn.setAutoCommit(true);
+
+                    deleteFromAssetsDir(inodeList);
+
+                    inodeList.clear();
+                    if (isInterrupted()) {
+                        return;
+                    }
+                    Thread.sleep(SLEEP_BETWEEN_RUNS_MS);
+                    inodeList.addAll(loadInodes(startDate, endDate, conn));
+
+                }
+
+            } catch (Exception e) {
+                Logger.error(this,
+                        "Error deleting old content from " + sdf.format(startDate) + " to " + sdf.format(endDate),
+                        e);
+
+                throw new DotRuntimeException(e);
+            }
+
+            inodeList.clear();
+            startDate = endDate;
+            endDate = Date.from(startDate.toInstant().plus(DAYS_TO_ITERATE, ChronoUnit.DAYS));
+            endDate = endDate.before(FINAL_END_DATE) ? endDate : FINAL_END_DATE;
+
+        }
+        Logger.info(this, "END: Deleted " + deleted + " old contentlet(s)");
+
+    }
+
+    boolean deleteFromAssetsDir(List<String> inodes) {
+        if (!CLEAN_DEAD_INODE_FROM_FS) {
+            return true;
+        }
+        for (String inode : inodes) {
+            String path = APILocator.getFileAssetAPI().getRealAssetPath(inode)
+                    .replace(FileAssetAPI.BINARY_FIELD + File.separator, "");
+
+            Logger.info(this, "Deleting file asset " + path);
+            try {
+                FileUtil.deltree(path);
+            } catch (Exception e) {
+                Logger.error(this, "Error deleting file asset " + path, e);
+                return false;
+            }
+
+
+        }
+        return true;
+    }
+
+
+    boolean isInterrupted() {
+        boolean stopping =
+                STOP_RUNNING_AT.getTime() < System.currentTimeMillis() || Thread.currentThread().isInterrupted();
+        if (stopping) {
+            Logger.info(this, "DropOldAssetsRunner is stopping");
+        }
+        return stopping;
+    }
+
+    boolean shouldRun() {
+        final String oldestServer = Try.of(() -> APILocator.getServerAPI().getOldestServer()).getOrElse("notIt");
+        return (oldestServer.equals(APILocator.getServerAPI().readServerId()));
+    }
+
+    /**
+     * This job will only run on one server at a time due to the cluster lock
+     */
+    @Override
+    public void run() {
+
+        if (!shouldRun()) {
+            Logger.info(this, "DropOldAssetsRunner is not running on this server");
             return;
-          }
-          Thread.sleep(SLEEP_BETWEEN_RUNS_MS);
-          inodeList.addAll(loadInodes(startDate, endDate, conn));
+        }
+        Logger.info(this, "Delete Drop Old Assets Job Started");
+        try {
+            deleteOldContent();
+        } catch (Throwable e) {
+            Logger.error(this, "Cannot Run - trying to lock DropOldAssetsRunner", e);
 
         }
 
-      } catch (Exception e) {
-        Logger.error(this, "Error deleting old content from " + sdf.format(startDate) + " to " + sdf.format(endDate),
-            e);
-
-        throw new DotRuntimeException(e);
-      }
-
-      inodeList.clear();
-      startDate = endDate;
-      endDate = Date.from(startDate.toInstant().plus(DAYS_TO_ITERATE, ChronoUnit.DAYS));
-      endDate = endDate.before(FINAL_END_DATE) ? endDate : FINAL_END_DATE;
-
     }
-    Logger.info(this, "END: Deleted " + deleted + " old contentlet(s)");
-
-  }
-
-  boolean deleteFromAssetsDir(List<String> inodes) {
-    if (!CLEAN_DEAD_INODE_FROM_FS) {
-      return true;
-    }
-    for (String inode : inodes) {
-      String path = APILocator.getFileAssetAPI().getRealAssetPath(inode)
-          .replace(FileAssetAPI.BINARY_FIELD + File.separator, "");
-
-      Logger.info(this, "Deleting file asset " + path);
-      try {
-        FileUtil.deltree(path);
-      } catch (Exception e) {
-        Logger.error(this, "Error deleting file asset " + path, e);
-        return false;
-      }
-
-
-    }
-    return true;
-  }
-
-
-  boolean isInterrupted() {
-    boolean stopping  = STOP_RUNNING_AT.getTime() < System.currentTimeMillis() || Thread.currentThread().isInterrupted();
-    if (stopping) {
-      Logger.info(this, "DropOldAssetsRunner is stopping");
-    }
-    return stopping;
-
-
-  }
-
-  boolean shouldRun() {
-
-    final String oldestServer = Try.of(() -> APILocator.getServerAPI().getOldestServer()).getOrElse("notIt");
-    return (oldestServer.equals(APILocator.getServerAPI().readServerId()));
-
-
-  }
-
-  /**
-   * This job will only run on one server at a time due to the cluster lock
-   */
-  @Override
-  public void run() {
-
-    if(!shouldRun()){
-      Logger.info(this, "DropOldAssetsRunner is not running on this server");
-      return;
-    }
-    Logger.info(this, "Delete Drop Old Assets Job Started");
-    try {
-      deleteOldContent();
-    } catch (Throwable e) {
-      Logger.error(this, "Cannot Run - trying to lock DropOldAssetsRunner", e);
-
-    }
-
-  }
 }
