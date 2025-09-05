@@ -57,7 +57,7 @@ public class DropOldAssetsRunner implements Runnable {
 
     final Date STOP_RUNNING_AT =
             MAX_RUNTIME_SECONDS > 0 ? Date.from(Instant.now().plus(MAX_RUNTIME_SECONDS, ChronoUnit.SECONDS))
-                    : Date.from(Instant.MAX);
+                    : Date.from(Instant.now().plus(100,ChronoUnit.DAYS));
     ClusterLockManager<String> locker = DotConcurrentFactory.getInstance()
             .getClusterLockManager(DropOldAssetsRunner.class.getName());
 
